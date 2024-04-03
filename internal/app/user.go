@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/pluhe7/gophermart/internal/model"
 )
@@ -74,11 +75,15 @@ func (a *App) GetBalance() (*model.Balance, error) {
 
 	return &model.Balance{
 		Current:   balance,
-		Withdrawn: withdrawsAmount,
+		Withdrawn: math.Round(withdrawsAmount*100) / 100,
 	}, nil
 }
 
 func (a *App) Withdraw(withdrawal model.WithdrawalData) error {
+	if !checkLuhn(withdrawal.OrderNumber) {
+		return model.ErrWrongOrderNumber
+	}
+
 	balance, err := a.Server.Storage.User().GetBalance(a.Session.UserID)
 	if err != nil {
 		return fmt.Errorf("get balance: %w", err)
@@ -86,10 +91,6 @@ func (a *App) Withdraw(withdrawal model.WithdrawalData) error {
 
 	if withdrawal.Sum > balance {
 		return model.ErrLowBalance
-	}
-
-	if !checkLuhn(withdrawal.OrderNumber) {
-		return model.ErrWrongOrderNumber
 	}
 
 	err = a.Server.Storage.Transaction().Create(&model.Transaction{
@@ -117,7 +118,7 @@ func (a *App) GetWithdrawals() ([]model.WithdrawalData, error) {
 			return nil, model.ErrNoWithdrawals
 		}
 
-		return nil, fmt.Errorf("find withdrawns for user: %w", err)
+		return nil, fmt.Errorf("find withdrawals for user: %w", err)
 	}
 
 	withdrawals := make([]model.WithdrawalData, 0, len(withdrawalTransactions))

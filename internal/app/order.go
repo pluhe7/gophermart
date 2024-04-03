@@ -25,9 +25,8 @@ func (a *App) SendOrder(number string) error {
 	if existingOrder != nil {
 		if existingOrder.UserID == a.Session.UserID {
 			return model.ErrCurrentUserOrderExist
-		} else {
-			return model.ErrOtherUserOrderExist
 		}
+		return model.ErrOtherUserOrderExist
 	}
 
 	err = a.Server.Storage.Order().Create(&model.Order{

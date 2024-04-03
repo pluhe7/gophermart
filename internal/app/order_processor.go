@@ -2,6 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"regexp"
+	"strconv"
 	"time"
 
 	"go.uber.org/zap"
@@ -64,38 +69,85 @@ func (a *App) StartOrderProcessor(ctx context.Context) {
 			if op.processingCounter >= services.AccrualSystemQueryLimit {
 				continue
 			}
+			op.processingCounter++
 
 			order := op.ordersToProcess.Pop(ctx)
 
-			accrualSystemOrder, err := op.accrualSystem.GetOrder(order.Number)
+			respBody, respStatus, err := op.accrualSystem.GetOrder(order.Number)
 			if err != nil {
 				logger.Log.Error("accrual system get order", zap.Error(err))
 				continue
 			}
 
-			var storageOrderStatus model.OrderStatus
+			switch respStatus {
+			case http.StatusOK:
+				var accrualSystemOrder services.AccrualSystemResponse
+				err = json.Unmarshal(respBody, &accrualSystemOrder)
+				if err != nil {
+					logger.Log.Error("parse order response from accrual system", zap.Error(err))
+					continue
+				}
 
-			switch accrualSystemOrder.Status {
-			case services.AccrualSystemOrderStatusRegistered, services.AccrualSystemOrderStatusProcessing:
-				storageOrderStatus = model.OrderStatusProcessing
+				var storageOrderStatus model.OrderStatus
 
-			case services.AccrualSystemOrderStatusProcessed:
-				storageOrderStatus = model.OrderStatusProcessed
+				switch accrualSystemOrder.Status {
+				case services.AccrualSystemOrderStatusRegistered, services.AccrualSystemOrderStatusProcessing:
+					storageOrderStatus = model.OrderStatusProcessing
 
-			case services.AccrualSystemOrderStatusInvalid:
-				storageOrderStatus = model.OrderStatusInvalid
+				case services.AccrualSystemOrderStatusProcessed:
+					storageOrderStatus = model.OrderStatusProcessed
+
+				case services.AccrualSystemOrderStatusInvalid:
+					storageOrderStatus = model.OrderStatusInvalid
+
+				default:
+					logger.Log.Error(fmt.Sprintf("get order %s from accrual system: wrong order status %s",
+						order.Number, accrualSystemOrder.Status))
+					continue
+				}
+
+				order.Status = storageOrderStatus
+				order.Accrual = accrualSystemOrder.Accrual
+
+				op.ordersToUpdate.Add(order)
+
+			case http.StatusTooManyRequests:
+				re := regexp.MustCompile(`Retry-After: (\d+)\s*No more than (\d+) requests per minute allowed`)
+				matchStrings := re.FindStringSubmatch(string(respBody))
+				if len(matchStrings) < 3 {
+					logger.Log.Error("parse numbers from too many request error")
+					continue
+				}
+
+				newProcessPeriod, err := strconv.Atoi(matchStrings[1])
+				if err != nil {
+					logger.Log.Error("parse accrual system process period", zap.Error(err))
+					continue
+				}
+
+				newQueryLimit, err := strconv.Atoi(matchStrings[2])
+				if err != nil {
+					logger.Log.Error("parse accrual system query limit", zap.Error(err))
+					continue
+				}
+
+				services.AccrualSystemQueryLimit = newQueryLimit
+				op.processingCounter = newQueryLimit
+
+				ticker.Reset(time.Duration(newProcessPeriod) * time.Second)
+
+				logger.Log.Warn(fmt.Sprintf("get order %s from accrual system: too many requests", order.Number))
+
+			case http.StatusNoContent:
+				logger.Log.Error(fmt.Sprintf("get order %s from accrual system: order is not registered", order.Number))
+
+			case http.StatusInternalServerError:
+				logger.Log.Error(fmt.Sprintf("get order %s from accrual system: internal error: %s", order.Number, string(respBody)))
 
 			default:
-				logger.Log.Error("wrong accrual system order status: " + string(accrualSystemOrder.Status))
-				continue
+				logger.Log.Error(fmt.Sprintf("get order %s from accrual system: unexpected response status %d %s",
+					order.Number, respStatus, string(respBody)))
 			}
-
-			order.Status = storageOrderStatus
-			order.Accrual = accrualSystemOrder.Accrual
-
-			op.ordersToUpdate.Add(order)
-
-			op.processingCounter++
 		}
 	}
 

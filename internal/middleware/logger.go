@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"io"
 	"time"
 
@@ -12,7 +13,10 @@ import (
 
 func RequestLoggerMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(ec echo.Context) error {
-		c := ec.(*Context)
+		c, ok := ec.(*Context)
+		if !ok {
+			c.Error(errors.New("expected context.Context"))
+		}
 
 		start := time.Now()
 
